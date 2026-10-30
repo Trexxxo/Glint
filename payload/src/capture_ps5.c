@@ -158,27 +158,28 @@ static void put64(uint8_t *p, size_t off, uint64_t value)
 /*
  * sceAvcap2OpenVideo parameter block.
  *
- * The call takes a single 0x2e0-byte struct built from nested sub-blocks
+ * 10.xx experimental layout based on the PBS 10.01/10.60 firmware tables.
+ * The call takes a 0x2b8-byte struct built from nested sub-blocks
  * (rate control, resolution, mask, output mode, audio companion). The
  * offsets below name each sub-block's start; `build_video_params` fills
- * them in a single pass. See docs/CAPTURE-INTERNALS.md for the full layout.
+ * them in a single pass. This layout is NOT yet verified on 10.20.
  */
-#define SL_VP_SIZE               0x2e0
+#define SL_VP_SIZE               0x2b8
 #define SL_VP_OFF_SIZE           0x08  /* u32: total block size (= SL_VP_SIZE) */
 #define SL_VP_OFF_HEADER         0x10  /* u32: fixed header value 0x28 */
 #define SL_VP_OFF_USAGE          0x1c  /* u32: usage class, 2 = encode */
 #define SL_VP_OFF_FPS_MODE       0x20  /* u32: profile FPS selector */
 #define SL_VP_OFF_FPS_FLAG       0x24  /* u32: fixed 1 */
 #define SL_VP_OFF_FEATURE        0x30  /* u32: capture feature id */
-#define SL_VP_OFF_RATE           0xb8  /* rate-control sub-block */
-#define SL_VP_OFF_FORMAT         0x1e8 /* format sub-block */
-#define SL_VP_OFF_WIDTH_BLOCK    0x208 /* width sub-block (u32 at +8) */
-#define SL_VP_OFF_RES_BLOCK      0x20c /* resolution sub-block (u32 at +8) */
-#define SL_VP_OFF_MASK_BLOCK     0x218 /* mask sub-block */
-#define SL_VP_OFF_VIDEO_OUT      0x2a0 /* VideoOutMode sub-block */
-#define SL_VP_OFF_AUDIO          0x2a4 /* audio companion sub-block */
-#define SL_VP_OFF_ENABLE_FLAG    0x2b4 /* u32: fixed 1 */
-#define SL_VP_OFF_FLAG_BYTE      0x2bc /* u8: fixed 1 */
+#define SL_VP_OFF_RATE           0xa8  /* rate-control sub-block */
+#define SL_VP_OFF_FORMAT         0x1d0 /* format sub-block */
+#define SL_VP_OFF_WIDTH_BLOCK    0x1f0 /* width sub-block (u32 at +8) */
+#define SL_VP_OFF_RES_BLOCK      0x1f4 /* resolution sub-block (u32 at +8) */
+#define SL_VP_OFF_MASK_BLOCK     0x200 /* mask sub-block */
+#define SL_VP_OFF_VIDEO_OUT      0x288 /* VideoOutMode sub-block */
+#define SL_VP_OFF_AUDIO          0x28c /* audio companion sub-block */
+#define SL_VP_OFF_ENABLE_FLAG    0x2a0 /* u32: fixed 1 */
+#define SL_VP_OFF_FLAG_BYTE      0x2a8 /* u8: fixed 1 */
 
 static void build_video_params(uint8_t *p, uint32_t feature, uint32_t width, uint32_t resolution,
                                uint32_t fps_mode, uint32_t video_out_mode,
@@ -195,7 +196,7 @@ static void build_video_params(uint8_t *p, uint32_t feature, uint32_t width, uin
 
     /* Rate-control sub-block. */
     const size_t rate = SL_VP_OFF_RATE;
-    put64(p, rate + 0x08, 0xe0);
+    put64(p, rate + 0x08, 0xd8);
     put64(p, rate + 0x10, 0x20);
     put32(p, rate + 0x18, bitrate);
     put32(p, rate + 0x1c, bitrate);
@@ -204,7 +205,7 @@ static void build_video_params(uint8_t *p, uint32_t feature, uint32_t width, uin
     put32(p, rate + 0x28, 0x33);
 
     /* Format sub-block. */
-    put64(p, SL_VP_OFF_FORMAT + 0x08, 0xf8);
+    put64(p, SL_VP_OFF_FORMAT + 0x08, 0xe8);
     put64(p, SL_VP_OFF_FORMAT + 0x10, 0x28);
 
     /* Width / resolution sub-blocks. */
@@ -296,20 +297,21 @@ static uint32_t g_last_video_mode = SL_VIDEO_MODE_USUAL;
 #define SL_START_RETRIES 3
 static int g_start_retries;         /* Start refusals before the first frame (see capture_session) */
 
-static void encoder_locked(const char *where)
+static void encoder_locked(const char *where, uint32_t error)
 {
     int first = !g_encoder_locked;
     g_encoder_locked = 1;
     /* The encoder-locked state does not reliably clear across a payload
      * restart, so we don't claim it will. */
-    cap_log("encoder refused to start (%s, video-out mode 0x%x)\n", where, g_last_video_mode);
+    cap_log("capture failed (%s, error 0x%08x, video-out mode 0x%x)\n",
+            where, error, g_last_video_mode);
     if (!first) return;
     if (g_last_video_mode != SL_VIDEO_MODE_USUAL)
         sl_notify(1, "Glint: the PS5 switched to 120 Hz output, which Glint can't capture. Set Screen "
                      "and Video > Video Output > 120 Hz Output to Off, then restart the PS5.");
     else
-        sl_notify(1, "Glint: the PS5 refused to start video capture (0x%08x). Load Glint again.",
-                  (unsigned)SL_SCE_START_LOCKED);
+        sl_notify(1, "Glint: %s failed (0x%08x). Check /data/glint/capture.log.",
+                  where, (unsigned)error);
 }
 
 
@@ -461,7 +463,7 @@ static void capture_session(void)
     }
 
     /* Lay the OpenVideo request out in the scratch region: parameter block
-     * at the base (0x2e0 bytes), separate 8-byte out-handle at +0x300,
+     * at the base (SL_VP_SIZE bytes), separate 8-byte out-handle at +0x300,
      * "RUNNING" state string at +0x600. Never overlap output and input. */
     /* Terminate only when an earlier Start or SetCallback reported a stale session (see g_need_terminate). */
     if (g_need_terminate && !avcap2_reset_disabled()) {
@@ -512,9 +514,10 @@ static void capture_session(void)
         uint8_t params[SL_VP_SIZE];
         build_video_params(params, attempts[i]->feature, attempts[i]->width, attempts[i]->resolution,
                            attempts[i]->fps_mode, video_mode, sl_opts.bitrate, sl_opts.minqp);
-        cap_log("OpenVideo params feature=%u %ux%u fps-mode=%u video-out-mode=0x%x\n",
-                attempts[i]->feature, attempts[i]->width, attempts[i]->resolution,
-                attempts[i]->fps_mode, video_mode);
+        cap_log("OpenVideo ABI3 10xx-experimental size=0x%x rate=0x%x format=0x%x width=0x%x video-out=0x%x feature=%u %ux%u fps-mode=%u video-out-mode=0x%x\n",
+                SL_VP_SIZE, SL_VP_OFF_RATE, SL_VP_OFF_FORMAT, SL_VP_OFF_WIDTH_BLOCK,
+                SL_VP_OFF_VIDEO_OUT, attempts[i]->feature, attempts[i]->width,
+                attempts[i]->resolution, attempts[i]->fps_mode, video_mode);
         if (sl_inject_write_at(&ctx, params_at, params, sizeof(params)) != 0) goto attempt_failed;
         /* Avcap2 ABI: OpenVideo(void **out_handle, const void *params, uint8_t flags).
          * Keep the output outside the request block, and pass the required third argument. */
@@ -548,7 +551,7 @@ attempt_failed:
         } else if (profile_unsupported((uint32_t)rc)) {
             /* Every candidate rejected: this isn't a bad profile, the encoder
              * won't open any profile right now. */
-            encoder_locked("OpenVideo");
+            encoder_locked("OpenVideo", (uint32_t)rc);
         }
     }
     if (!opened) goto done;
@@ -634,7 +637,7 @@ attempt_failed:
                     g_start_retries, SL_START_RETRIES);
             goto done;
         }
-        encoder_locked("Start");
+        encoder_locked("Start", (uint32_t)rc);
         goto done;
     }
     if (rc == SL_CALL_ERROR || (int32_t)rc < 0) goto done;
@@ -967,7 +970,7 @@ static void *capture_main(void *arg)
         { 12, 0x438, 4, 1920, 1080 },
     };
 
-    uint8_t params[0x2e0];
+    uint8_t params[SL_VP_SIZE];
     uint32_t handle = 0;
     for (unsigned i = 0; i < sizeof(attempts) / sizeof(attempts[0]); i++) {
         build_video_params(params, attempts[i].feature, attempts[i].width, attempts[i].resolution,
