@@ -461,7 +461,8 @@ static void capture_session(void)
     }
 
     /* Lay the OpenVideo request out in the scratch region: parameter block
-     * at the base, out-handle at +8, "RUNNING" state string at +0x600. */
+     * at the base (0x2e0 bytes), separate 8-byte out-handle at +0x300,
+     * "RUNNING" state string at +0x600. Never overlap output and input. */
     /* Terminate only when an earlier Start or SetCallback reported a stale session (see g_need_terminate). */
     if (g_need_terminate && !avcap2_reset_disabled()) {
         intptr_t terminate_fn = sl_resolve_in(ctx.target_pid, "libSceAvcap2.sprx", "sceAvcap2Terminate");
@@ -480,9 +481,8 @@ static void capture_session(void)
     }
 
     intptr_t params_at = ctx.scratch;
-    intptr_t handle_at = ctx.scratch + 8;
+    intptr_t handle_at = ctx.scratch + 0x300;
     intptr_t running_at = ctx.scratch + 0x600;
-    uint32_t handle = 0;
     uint64_t handle_qword = 0;
     int opened = 0;
     uint32_t chosen_feature = 0;
@@ -516,17 +516,19 @@ static void capture_session(void)
                 attempts[i]->feature, attempts[i]->width, attempts[i]->resolution,
                 attempts[i]->fps_mode, video_mode);
         if (sl_inject_write_at(&ctx, params_at, params, sizeof(params)) != 0) goto attempt_failed;
-
-        uint64_t open_args[6] = { (uint64_t)params_at, (uint64_t)handle_at };
+        /* Avcap2 ABI: OpenVideo(void **out_handle, const void *params, uint8_t flags).
+         * Keep the output outside the request block, and pass the required third argument. */
+        handle_qword = 0;
+        if (sl_inject_write_at(&ctx, handle_at, &handle_qword, sizeof(handle_qword)) != 0)
+            goto attempt_failed;
+        uint64_t open_args[6] = { (uint64_t)handle_at, (uint64_t)params_at, 0 };
         rc = sl_inject_call_fast(&ctx, open_video, open_args);
         log_call("OpenVideo()", rc);
         if (rc != SL_CALL_ERROR && (uint32_t)rc == 0) {
-            /* On success OpenVideo also writes the full session handle (u64)
-             * back into the first slot of the parameter block. */
-            sl_inject_read_at(&ctx, ctx.scratch, &handle_qword, sizeof(handle_qword));
-            cap_log("session handle=0x%llx\n", (unsigned long long)handle_qword);
+            if (sl_inject_read_at(&ctx, handle_at, &handle_qword, sizeof(handle_qword)) != 0)
+                goto attempt_failed;
+            cap_log("OpenVideo returned handle=0x%llx\n", (unsigned long long)handle_qword);
         }
-        sl_inject_read_at(&ctx, handle_at, &handle, sizeof(handle));
         if (rc != SL_CALL_ERROR && (uint32_t)rc == 0 && handle_qword) {
             opened = 1;
             chosen_feature = attempts[i]->feature;
@@ -551,10 +553,8 @@ attempt_failed:
     }
     if (!opened) goto done;
 
-    /* Fetch the full 64-bit session handle written back into the first slot
-     * of the parameter block (ctx.scratch) by OpenVideo. */
-    uint64_t session = 0;
-    sl_inject_read_at(&ctx, ctx.scratch, &session, sizeof(session));
+    /* OpenVideo writes the 64-bit session handle to the separate out-handle. */
+    uint64_t session = handle_qword;
     cap_log("session=0x%llx\n", (unsigned long long)session);
 
     /* SetVideoBitrate: {u64 size=0x10, u32 bitrate, u32 budget} at scratch+0x780. */
