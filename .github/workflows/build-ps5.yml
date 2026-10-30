@@ -1,0 +1,66 @@
+name: Build Glint PS5 ELF
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ps5-elf:
+    name: PS5 payload (ELF)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Glint
+        uses: actions/checkout@v4
+
+      - name: Install SDK prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 make unzip file
+
+      - name: Download PS5 payload SDK v0.45
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/ps5-payload-dev/sdk/releases/download/v0.45/ps5-payload-sdk.zip" \
+            --output "$RUNNER_TEMP/ps5-payload-sdk.zip"
+          unzip -q "$RUNNER_TEMP/ps5-payload-sdk.zip" -d "$RUNNER_TEMP"
+
+          if [[ -f "$RUNNER_TEMP/ps5-payload-sdk/toolchain/prospero.mk" ]]; then
+            sdk="$RUNNER_TEMP/ps5-payload-sdk"
+          elif [[ -f "$RUNNER_TEMP/toolchain/prospero.mk" ]]; then
+            sdk="$RUNNER_TEMP"
+          else
+            echo "::error::PS5 SDK missing toolchain/prospero.mk"
+            exit 1
+          fi
+          echo "PS5_PAYLOAD_SDK=$sdk" >> "$GITHUB_ENV"
+
+      - name: Build console payload and synthetic test payload
+        run: make -C payload/ps5 -j2
+
+      - name: Verify ELF output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s payload/build/glint-payload.elf
+          test -s payload/build/glint-payload-test.elf
+          file payload/build/glint-payload.elf
+          file payload/build/glint-payload-test.elf
+          mkdir -p dist
+          cp payload/build/glint-payload.elf dist/Glint-1.2-ps5.elf
+          cp payload/build/glint-payload-test.elf dist/Glint-1.2-ps5-test.elf
+          sha256sum dist/*.elf > dist/SHA256SUMS.txt
+
+      - name: Upload ELF artifacts (experimental firmware compatibility)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glint-PS5-ELF-experimental
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
