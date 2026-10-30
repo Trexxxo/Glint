@@ -27,11 +27,13 @@ decodes on the GPU and shows the console in a window, at 1080p60, with sound.
 No capture card needed. A browser can also open the payload directly.
 
 > [!IMPORTANT]
-> Glint has only been tested on **firmware 13.60**, so that's where it runs
-> most stable for now. Other firmwares may freeze or misbehave. It's still
-> early and being tested, so expect some rough edges. If something breaks,
-> please [open an issue](https://github.com/MiladRTX/Glint/issues) with your
-> firmware and the logs.
+> **Trexxxo experimental PS5 10.xx fork.** This ELF replaces the upstream 11.40–12.70
+> capture-parameter layout with the layout recorded in PBS firmware tables for
+> **10.01 / 10.60**. Its behavior on **10.20 is unverified**; a successful build
+> does not establish console compatibility. Upstream Glint has only been tested
+> on **13.60**, and its compatibility claims do not apply to this modified ELF.
+> When troubleshooting, compare `/data/glint/capture.log` and look for
+> `OpenVideo ABI3 10xx-experimental` to confirm this build was loaded.
 
 > [!WARNING]
 > **Glint only works in 60 Hz mode.** If a game switches the PS5 to 120 Hz,
